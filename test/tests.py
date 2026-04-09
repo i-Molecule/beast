@@ -39,9 +39,9 @@ TABLE_PATH = _resolve_table_path()
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from chemical_screener.database import DataBase, ZINC
-from chemical_screener.run import get_sim_compounds, get_sim_scores
-from chemical_screener.tanimoto_cpp import calculate_tanimoto_score_packed_f16
+from beast.database import DataBase, ZINC
+from beast.run import get_sim_compounds, get_sim_scores
+from beast.tanimoto_cpp import calculate_tanimoto_score_packed_f16
 
 
 def _manual_scores_from_packed(

@@ -14,7 +14,7 @@ class BuildShared(Command):
         pass
 
     def run(self):
-        src_dir = Path(__file__).parent / "src" / "chemical_screener"
+        src_dir = Path(__file__).parent / "src" / "beast"
         output_path = src_dir / "libtanimoto.so"
         cmd = [
             "g++",

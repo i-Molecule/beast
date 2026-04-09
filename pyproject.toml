@@ -3,7 +3,7 @@ requires = ["setuptools>=64", "wheel", "numpy"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "chemical-screener"
+name = "beast"
 version = "0.1.0"
 description = "Toolkit for parsing and screening chemical libraries.(E.g. ZINC)"
 requires-python = ">=3.10,<=3.12"
@@ -17,11 +17,11 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["chemical_screener"]
+packages = ["beast"]
 package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
-chemical_screener = ["*.so", "*.h", "*.cpp"]
+beast = ["*.so", "*.h", "*.cpp"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge", "bioconda"]
@@ -39,7 +39,7 @@ zlib = "*"
 numpy = "1.23.*"
 
 [tool.pixi.pypi-dependencies]
-chemical-screener = { path = ".", editable = true }
+beast = { path = ".", editable = true }
 
 [tool.pixi.tasks]
 build = { depends-on = ["build-tanimoto", "build-parser"] }

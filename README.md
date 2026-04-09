@@ -1,6 +1,6 @@
-# chemical-screener
+# beast
 
-`chemical-screener` builds searchable fingerprint tables from large SMILES libraries
+`beast` builds searchable fingerprint tables from large SMILES libraries
 such as ZINC or Enamine REAL and queries them from Python.
 
 ## Requirements
@@ -21,7 +21,7 @@ pixi run build
 `pixi run build` compiles:
 
 - the parser binaries in `parser/`
-- `src/chemical_screener/libtanimoto.so`
+- `src/beast/libtanimoto.so`
 
 Use `pixi shell` for an interactive environment, or prefix commands with
 `pixi run ...`.
@@ -42,8 +42,8 @@ Minimal Python example:
 ```python
 import numpy as np
 
-from chemical_screener.database import ZINC
-from chemical_screener.run import get_sim_compounds, get_sim_scores
+from beast.database import ZINC
+from beast.run import get_sim_compounds, get_sim_scores
 
 db = ZINC("parser/data/tables/table_128.csv", max_files=3)
 
@@ -225,8 +225,8 @@ Python:
 ```python
 import numpy as np
 
-from chemical_screener.database import ZINC
-from chemical_screener.run import get_sim_compounds, get_sim_scores
+from beast.database import ZINC
+from beast.run import get_sim_compounds, get_sim_scores
 
 db = ZINC("tables/table_128.csv")
 
@@ -293,8 +293,8 @@ And use it the same way
 ```python
 import numpy as np
 
-from chemical_screener.database import DataBase
-from chemical_screener.run import get_sim_compounds, get_sim_scores
+from beast.database import DataBase
+from beast.run import get_sim_compounds, get_sim_scores
 
 db = DataBase("tables/table_128.csv")
 
