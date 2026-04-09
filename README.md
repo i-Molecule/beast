@@ -303,3 +303,50 @@ fp = np.array([1, 0, 1, 0] * 32, dtype=np.uint8)
 
 scores = get_sim_scores(x_b=db, x_q=fp)
 ```
+
+### Generic Chunk Normalization
+
+For non-ZINC and non-Enamine sources, use `normalize_chunks`. It reads the same
+`chunk_id,abs_path,rel_path` manifest, detects or accepts `.smi` /
+`.cxsmiles`-style lines as well as `.csv` / `.tsv`, removes stereochemistry,
+and writes `.zst` chunks plus a replacement `chunk_table.csv` that is directly
+compatible with `generate_fingerprints`.
+
+Examples:
+
+```bash
+./parser/normalize_chunks \
+  --chunk-table raw/chunk_table.csv \
+  --out-dir normalized \
+  --format auto \
+  --producers 4 \
+  --inner-threads 12
+```
+
+chunks are CSV with named columns:
+
+```bash
+./parser/normalize_chunks \
+  --chunk-table raw_csv/chunk_table.csv \
+  --out-dir normalized \
+  --format csv \
+  --header yes \
+  --smiles-column smiles \
+  --id-column compound_id
+```
+
+chunks are in headerless CSV with no ID column:
+
+```bash
+./parser/normalize_chunks \
+  --chunk-table raw_csv/chunk_table.csv \
+  --out-dir normalized \
+  --format csv \
+  --header no \
+  --smiles-column 0 \
+  --id-column none
+```
+
+When an input row has no usable ID, `normalize_chunks` generates one in the
+form `<prefix>_<chunk_id>_<line_number>`. Change the prefix with
+`--generated-id-prefix`.

@@ -44,4 +44,5 @@ $CXX $CXXFLAGS parser/deduplicate_zinc.cpp -o parser/deduplicate_zinc $HTSLIB_FL
 $CXX $CXXFLAGS parser/download_zinc.cpp -o parser/download_zinc -lz
 $CXX $CXXFLAGS parser/remove_stereo.cpp -o parser/remove_stereo $HTSLIB_FLAGS $ZSTD_FLAGS $RDKIT_FLAGS
 $CXX $CXXFLAGS parser/remove_stereo_enamine.cpp -o parser/remove_stereo_enamine $ZSTD_FLAGS $BZIP2_FLAGS $RDKIT_FLAGS
+$CXX $CXXFLAGS parser/normalize_chunks.cpp -o parser/normalize_chunks $HTSLIB_FLAGS $ZSTD_FLAGS $BZIP2_FLAGS $RDKIT_FLAGS
 $CXX $CXXFLAGS parser/generate_fingerprints.cpp -o parser/generate_fingerprints $HTSLIB_FLAGS $ZSTD_FLAGS $RDKIT_FLAGS
