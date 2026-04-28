@@ -51,6 +51,45 @@ def _is_single_query_input(x_q) -> bool:
     return x_q.ndim == 1 or len(x_q) == 1
 
 
+def _query_ids_allowed_for_on_bits(
+    onesQ: np.ndarray,
+    on_bits: int,
+    fp_size_bits: int,
+    lower_bound: float,
+    upper_bound: float,
+) -> np.ndarray:
+    onesQ = np.asarray(onesQ, dtype=np.float32)
+    onesA = float(on_bits)
+
+    if lower_bound > upper_bound:
+        return np.array([], dtype=np.int64)
+
+    allowed = onesQ > 0.0
+
+    if lower_bound > 0.0:
+        max_ab = np.maximum(onesA, onesQ)
+        max_tanimoto = np.divide(
+            np.minimum(onesA, onesQ),
+            max_ab,
+            out=np.zeros_like(onesQ, dtype=np.float32),
+            where=max_ab > 0.0,
+        )
+        allowed &= max_tanimoto >= lower_bound
+
+    if upper_bound < 1.0:
+        min_inter = np.maximum(0.0, onesA + onesQ - float(fp_size_bits))
+        denom = onesA + onesQ - min_inter
+        min_tanimoto = np.divide(
+            min_inter,
+            denom,
+            out=np.zeros_like(onesQ, dtype=np.float32),
+            where=denom > 0.0,
+        )
+        allowed &= min_tanimoto <= upper_bound
+
+    return np.flatnonzero(allowed)
+
+
 def get_sim_scores(
     x_b,
     x_q,
@@ -319,44 +358,56 @@ def get_sim_compounds_multi_query(
         positions or SMILES payloads for each query that matched in that chunk.
     """
 
-    x_q_packed, onesQ = prepare_query(x_q)
-    bit_bound_range = [min(onesQ) * lower_bound, max(onesQ) / lower_bound]
-    n_queries = len(onesQ)
+    x_q_arr = np.asarray(x_q)
+    x_q_packed, onesQ = prepare_query(x_q_arr)
+    fp_size_bits = x_q_arr.shape[1] if x_q_arr.ndim == 2 else x_q_arr.shape[0]
 
     database_size = len(x_b)
     arguments_raw = x_b.chunk_info
 
     arguments = []
     max_batch = 0  # we need it for effective buffer caching in workers
+    allowed_query_ids_by_on_bits = {}
     for i, path, batch_size, on_bits, start, end in arguments_raw:
         arguments.append((i, path, batch_size, on_bits, start, end))
         if batch_size > max_batch:
             max_batch = batch_size
+        if on_bits not in allowed_query_ids_by_on_bits:
+            allowed_query_ids_by_on_bits[on_bits] = _query_ids_allowed_for_on_bits(
+                onesQ,
+                on_bits,
+                fp_size_bits,
+                lower_bound,
+                upper_bound,
+            )
 
     search_results = defaultdict(lambda: defaultdict(dict))
     buffer_cache = _make_thread_buffer_cache()
 
     def _worker(idx: int, path: str, batch_size: int, on_bits: int, *args, **kwargs):
-        if (
-            batch_size == 0
-            or on_bits < bit_bound_range[0]
-            or on_bits > bit_bound_range[1]
-        ):
+        query_ids = allowed_query_ids_by_on_bits[on_bits]
+        n_active_queries = len(query_ids)
+        if batch_size == 0 or n_active_queries == 0:
             return batch_size
 
         chunk = np.load(path, mmap_mode="r")
         onesA = on_bits
 
-        hit_positions = buffer_cache("hit_positions", (n_queries, max_batch), np.uint32)
+        query_bytes = np.ascontiguousarray(x_q_packed[query_ids], dtype=np.uint8)
+        active_onesQ = np.ascontiguousarray(onesQ[query_ids], dtype=np.float32)
+
+        hit_positions = buffer_cache(
+            "hit_positions", (n_active_queries, max_batch), np.uint32
+        )
         # hit_positions = hit_positions[:, : chunk.shape[0]] #does not work because it is not contiguous in memory after slicing
 
-        hit_counts = buffer_cache("hit_counts", (n_queries,), np.uint32)
+        hit_counts = buffer_cache("hit_counts", (n_active_queries,), np.uint32)
         # hit_counts.fill(0) # we can skip this because calculate_overlap_union_packed will set hit_counts[i] to 0 for queries that have no hits in the chunk
 
         n_hits = calculate_overlap_union_packed(
             chunk,
-            x_q_packed,
-            onesQ,
+            query_bytes,
+            active_onesQ,
             onesA,
             lower_bound,
             upper_bound,
@@ -367,16 +418,17 @@ def get_sim_compounds_multi_query(
 
         if n_hits:
             local_results = defaultdict(dict)
-            for i in range(n_queries):
+            for i in range(n_active_queries):
                 if hit_counts[i] > 0:
+                    query_idx = int(query_ids[i])
                     if return_smiles:
-                        local_results[i]["smiles"] = (
+                        local_results[query_idx]["smiles"] = (
                             x_b.get_smiles_and_ids_by_ref_indices(
                                 {idx: hit_positions[i, : hit_counts[i]]}
                             )[idx]
                         )
                     else:
-                        local_results[i]["positions"] = hit_positions[
+                        local_results[query_idx]["positions"] = hit_positions[
                             i, : hit_counts[i]
                         ].copy()
 

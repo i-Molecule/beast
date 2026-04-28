@@ -40,7 +40,11 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from beast.database import DataBase, ZINC
-from beast.run import get_sim_compounds, get_sim_scores
+from beast.run import (
+    _query_ids_allowed_for_on_bits,
+    get_sim_compounds,
+    get_sim_scores,
+)
 from beast.tanimoto_cpp import calculate_tanimoto_score_packed_f16
 
 
@@ -93,6 +97,34 @@ def _manual_positions_for_queries(
             expected.setdefault(chunk_idx, {})[query_idx] = chunk_hits["positions"]
 
     return expected
+
+
+def test_query_ids_allowed_for_on_bits_filters_impossible_queries() -> None:
+    ones_q = np.array([10, 50], dtype=np.float32)
+
+    query_ids = _query_ids_allowed_for_on_bits(
+        ones_q,
+        on_bits=60,
+        fp_size_bits=128,
+        lower_bound=0.8,
+        upper_bound=1.0,
+    )
+
+    np.testing.assert_array_equal(query_ids, np.array([1]))
+
+
+def test_query_ids_allowed_for_on_bits_respects_upper_bound() -> None:
+    ones_q = np.array([8], dtype=np.float32)
+
+    query_ids = _query_ids_allowed_for_on_bits(
+        ones_q,
+        on_bits=8,
+        fp_size_bits=10,
+        lower_bound=0.0,
+        upper_bound=0.5,
+    )
+
+    assert query_ids.size == 0
 
 
 @pytest.fixture(scope="module")
