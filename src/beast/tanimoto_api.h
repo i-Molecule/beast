@@ -95,6 +95,23 @@ void calculate_tanimoto_score_packed_f16(
 );
 
 /**
+ * Calculates Tanimoto scores for a single query against N targets.
+ * Input is bit-packed along axis=1 (shape: n_rows x fp_size_bytes).
+ * Query is bit-packed bytes (length fp_size_bytes).
+ * Outputs centi-scores: round(score * 100), clamped to [0, 100].
+ */
+void calculate_tanimoto_score_packed_u8(
+    const uint8_t* A_ptr, // Row-packed bytes (bit-packed along axis=1)
+    const uint8_t* query_bytes_ptr,
+    uint32_t onesQ,
+    uint32_t onesA,
+    uint8_t* scores_out_ptr, // Output: Array of uint8 centi-scores (length n_rows)
+    size_t fp_size,
+    size_t n_rows,
+    int n_threads
+);
+
+/**
  * Calculates Tanimoto scores for a single query against N targets
  * and concurrently filters them based on popcount thresholds.
  * Returns the total number of hits found.

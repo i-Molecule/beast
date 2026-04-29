@@ -7,7 +7,7 @@ import numpy as np
 from tqdm import tqdm
 
 from beast.tanimoto_cpp import (
-    calculate_tanimoto_score_packed_f16,
+    calculate_tanimoto_score_packed_u8_unchecked,
     calculate_tanimoto_score_for_hits_packed,
     calculate_overlap_union_packed,
 )
@@ -108,17 +108,17 @@ def get_sim_scores(
             2D array. Inputs are bit-packed internally.
         row_width: Reserved argument. Present in the API but not used by the
             current implementation.
-        output_memmap: Optional filesystem path where the float16 score vector
-            should be written as a NumPy memmap. If omitted, scores are kept in
-            memory.
+        output_memmap: Optional filesystem path where the score vector should
+            be written as a NumPy memmap. If omitted, scores are kept in memory.
         num_workers: Number of Python worker threads used to process chunks.
         threads_per_worker: Number of native threads passed to the packed
             Tanimoto kernel for each chunk.
 
     Returns:
-        A float16 NumPy array or memmap containing one score per database row.
+        A uint8 NumPy array or memmap containing one centi-score per database
+        row. Values are stored as ``floor(score * 100 + 0.5)`` in the range
+        0..100.
     """
-
     x_q = np.asarray(x_q)
     if _is_single_query_input(x_q):
         x_q = x_q.reshape(-1)
@@ -129,6 +129,7 @@ def get_sim_scores(
         )
 
     x_q_packed, onesQ = prepare_query(x_q)
+    onesQ_scalar = int(onesQ[0])
     database_size = len(x_b)
     arguments_raw = x_b.chunk_info
 
@@ -155,10 +156,10 @@ def get_sim_scores(
 
         score_view = scores_flat[start:end]
         onesA = on_bits
-        calculate_tanimoto_score_packed_f16(
+        calculate_tanimoto_score_packed_u8_unchecked(
             chunk,
             x_q_packed,
-            onesQ,
+            onesQ_scalar,
             onesA,
             score_view,
             n_threads=threads_per_worker,
@@ -169,10 +170,10 @@ def get_sim_scores(
 
     if output_memmap is not None:
         scores_flat = np.memmap(
-            filename=output_memmap, dtype=np.float16, shape=(database_size,), mode="w+"
+            filename=output_memmap, dtype=np.uint8, shape=(database_size,), mode="w+"
         )
     else:
-        scores_flat = np.empty(database_size, dtype=np.float16)
+        scores_flat = np.empty(database_size, dtype=np.uint8)
 
     with ThreadPoolExecutor(max_workers=num_workers) as ex, tqdm(
         total=database_size

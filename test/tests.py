@@ -45,7 +45,10 @@ from beast.run import (
     get_sim_compounds,
     get_sim_scores,
 )
-from beast.tanimoto_cpp import calculate_tanimoto_score_packed_f16
+from beast.tanimoto_cpp import (
+    calculate_tanimoto_score_packed_f16,
+    calculate_tanimoto_score_packed_u8,
+)
 
 
 def _manual_scores_from_packed(
@@ -63,6 +66,12 @@ def _manual_scores_from_packed(
         where=denominators != 0,
     )
     return scores.astype(np.float32)
+
+
+def _quantize_scores_u8(scores: np.ndarray) -> np.ndarray:
+    return np.floor(scores.astype(np.float32) * 100.0 + 0.5).clip(0, 100).astype(
+        np.uint8
+    )
 
 
 def _manual_hits_for_query(
@@ -168,29 +177,172 @@ def test_score_fp_matches_manual_scores_for_real_chunks(
     assert scores[query_row] == np.float16(1.0)
 
 
-def test_get_sim_scores_matches_manual_scores_from_zinc_table() -> None:
+def test_score_packed_u8_matches_manual_quantized_scores(
+    zinc_manifest: pd.DataFrame,
+) -> None:
+    manifest_row = zinc_manifest.iloc[0]
+    chunk = np.load(manifest_row["npy"], mmap_mode="r")[:64]
+    chunk = np.ascontiguousarray(chunk, dtype=np.uint8)
+    query_bytes = np.ascontiguousarray(chunk[0], dtype=np.uint8)
+
+    scores = np.empty(chunk.shape[0], dtype=np.uint8)
+    ones_q = int(np.unpackbits(query_bytes, bitorder="big").sum())
+    calculate_tanimoto_score_packed_u8(
+        chunk,
+        query_bytes,
+        ones_q,
+        int(manifest_row["onbits"]),
+        scores,
+        n_threads=1,
+        fp_size=chunk.shape[1],
+        n_rows=chunk.shape[0],
+    )
+
+    expected = _quantize_scores_u8(
+        _manual_scores_from_packed(chunk, query_bytes, int(manifest_row["onbits"]))
+    )
+    np.testing.assert_array_equal(scores, expected)
+    assert scores[0] == np.uint8(100)
+
+
+def test_score_packed_u8_uses_half_up_integer_rounding() -> None:
+    query_bytes = np.array([0b11111111], dtype=np.uint8)
+    chunk = np.array(
+        [
+            [0b00000000],
+            [0b10000000],
+            [0b11110000],
+            [0b11111111],
+        ],
+        dtype=np.uint8,
+    )
+    scores = np.empty(chunk.shape[0], dtype=np.uint8)
+
+    calculate_tanimoto_score_packed_u8(
+        chunk,
+        query_bytes,
+        onesQ=8,
+        onesA=8,
+        scores_out=scores,
+        n_threads=1,
+        fp_size=chunk.shape[1],
+        n_rows=chunk.shape[0],
+    )
+
+    np.testing.assert_array_equal(scores, np.array([0, 7, 33, 100], dtype=np.uint8))
+
+
+def test_score_packed_u8_handles_unaligned_rows() -> None:
+    query_bytes = np.arange(16, dtype=np.uint8)
+    base = np.zeros((4, 17), dtype=np.uint8)
+    chunk = base[:, 1:]
+    chunk[:] = np.array(
+        [
+            query_bytes,
+            np.zeros(16, dtype=np.uint8),
+            np.full(16, 0xFF, dtype=np.uint8),
+            query_bytes ^ np.uint8(0x55),
+        ],
+        dtype=np.uint8,
+    )
+    scores = np.empty(chunk.shape[0], dtype=np.uint8)
+    ones_q = int(np.unpackbits(query_bytes, bitorder="big").sum())
+
+    calculate_tanimoto_score_packed_u8(
+        chunk,
+        query_bytes,
+        onesQ=ones_q,
+        onesA=ones_q,
+        scores_out=scores,
+        n_threads=1,
+        fp_size=chunk.shape[1],
+        n_rows=chunk.shape[0],
+    )
+
+    expected = _quantize_scores_u8(
+        _manual_scores_from_packed(chunk, query_bytes, ones_q)
+    )
+    np.testing.assert_array_equal(scores, expected)
+
+
+@pytest.mark.parametrize("width_bytes", [8, 32, 64])
+def test_score_packed_u8_fast_word_widths_match_manual_quantized_scores(
+    width_bytes: int,
+) -> None:
+    rows = 9
+    storage = np.arange(rows * width_bytes + 1, dtype=np.uint8)
+    chunk = np.ndarray(
+        shape=(rows, width_bytes),
+        dtype=np.uint8,
+        buffer=storage,
+        offset=1,
+    )
+    query_bytes = np.ascontiguousarray(chunk[0], dtype=np.uint8)
+    scores = np.empty(rows, dtype=np.uint8)
+    ones_q = int(np.unpackbits(query_bytes, bitorder="big").sum())
+    ones_a = width_bytes * 8
+
+    calculate_tanimoto_score_packed_u8(
+        chunk,
+        query_bytes,
+        onesQ=ones_q,
+        onesA=ones_a,
+        scores_out=scores,
+        n_threads=1,
+        fp_size=chunk.shape[1],
+        n_rows=chunk.shape[0],
+    )
+
+    expected = _quantize_scores_u8(_manual_scores_from_packed(chunk, query_bytes, ones_a))
+    np.testing.assert_array_equal(scores, expected)
+
+
+def test_get_sim_scores_matches_manual_quantized_scores() -> None:
     database = ZINC(TABLE_PATH, max_files=3)
     first_chunk = np.load(database.fp_files[0], mmap_mode="r")
     query_bits = np.unpackbits(first_chunk[0], bitorder="big").astype(np.uint8)
     query_bytes = np.packbits(query_bits, bitorder="big")
 
     scores = get_sim_scores(
-        database, query_bits, num_workers=1, threads_per_worker=1
+        database,
+        query_bits,
+        num_workers=1,
+        threads_per_worker=1,
     )
 
     expected_parts = []
     for _, path, _, on_bits, _, _ in database.chunk_info:
         chunk = np.load(path, mmap_mode="r")
         expected_parts.append(
-            _manual_scores_from_packed(chunk, query_bytes, int(on_bits)).astype(
-                np.float16
+            _quantize_scores_u8(
+                _manual_scores_from_packed(chunk, query_bytes, int(on_bits))
             )
         )
     expected = np.concatenate(expected_parts)
 
     assert scores.shape == (len(database),)
-    assert scores.dtype == np.float16
+    assert scores.dtype == np.uint8
     np.testing.assert_array_equal(scores, expected)
+
+
+def test_get_sim_scores_memmap_uses_uint8_dtype(tmp_path: Path) -> None:
+    database = ZINC(TABLE_PATH, max_files=3)
+    first_chunk = np.load(database.fp_files[0], mmap_mode="r")
+    query_bits = np.unpackbits(first_chunk[0], bitorder="big").astype(np.uint8)
+    output_path = tmp_path / "scores.u8"
+
+    scores = get_sim_scores(
+        database,
+        query_bits,
+        output_memmap=output_path,
+        num_workers=1,
+        threads_per_worker=1,
+    )
+    reopened = np.memmap(output_path, dtype=np.uint8, mode="r", shape=(len(database),))
+
+    assert scores.dtype == np.uint8
+    assert output_path.stat().st_size == len(database)
+    np.testing.assert_array_equal(reopened, scores)
 
 
 def test_database_alias_matches_zinc_shape_and_chunk_info() -> None:

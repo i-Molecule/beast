@@ -138,6 +138,31 @@ _calculate_tanimoto_score_packed_f16 = _load_symbol(
     None,
 )
 
+# void calculate_tanimoto_score_packed_u8(
+#     const uint8_t* A_ptr,
+#     const uint8_t* query_bytes_ptr,
+#     uint32_t onesQ,
+#     uint32_t onesA,
+#     uint8_t* scores_out_ptr,
+#     size_t fp_size,
+#     size_t n_rows,
+#     int n_threads
+# );
+_calculate_tanimoto_score_packed_u8 = _load_symbol(
+    "calculate_tanimoto_score_packed_u8",
+    [
+        ndpointer(ctypes.c_uint8, flags="C_CONTIGUOUS"), # A
+        ndpointer(ctypes.c_uint8, flags="C_CONTIGUOUS"), # query_bytes
+        ctypes.c_uint32, # onesQ
+        ctypes.c_uint32, # onesA
+        ndpointer(ctypes.c_uint8, flags="C_CONTIGUOUS"), # scores_out
+        ctypes.c_size_t, # fp_size
+        ctypes.c_size_t, # n_rows
+        ctypes.c_int # n_threads
+    ],
+    None,
+)
+
 # int calculate_tanimoto_score_for_hits(
 #     const uint8_t* A_ptr,
 #     const int32_t* query_indices_ptr,
@@ -358,6 +383,83 @@ def calculate_tanimoto_score_packed_f16(
         n_rows,
         n_threads
     )
+
+def calculate_tanimoto_score_packed_u8(
+    A: np.ndarray,
+    query_bytes: np.ndarray,
+    onesQ: int,
+    onesA: int,
+    scores_out: np.ndarray,
+    n_threads: int = 0,
+    fp_size: int | None = None,
+    n_rows: int | None = None,
+):
+    if _calculate_tanimoto_score_packed_u8 is None:
+        raise RuntimeError(
+            "calculate_tanimoto_score_packed_u8 not available in libtanimoto.so"
+        )
+    if query_bytes is None:
+        raise ValueError(
+            "query_bytes is required for calculate_tanimoto_score_packed_u8."
+        )
+    if scores_out is None:
+        raise ValueError(
+            "scores_out is required for calculate_tanimoto_score_packed_u8."
+        )
+
+    A = np.ascontiguousarray(A, dtype=np.uint8)
+    query_bytes = np.ascontiguousarray(query_bytes, dtype=np.uint8)
+    scores_out = np.ascontiguousarray(scores_out, dtype=np.uint8)
+
+    if fp_size is None:
+        fp_size = A.shape[1]
+    if n_rows is None:
+        n_rows = A.shape[0]
+
+    _calculate_tanimoto_score_packed_u8(
+        A,
+        query_bytes,
+        int(onesQ),
+        int(onesA),
+        scores_out,
+        fp_size,
+        n_rows,
+        n_threads
+    )
+
+
+def calculate_tanimoto_score_packed_u8_unchecked(
+    A: np.ndarray,
+    query_bytes: np.ndarray,
+    onesQ: int,
+    onesA: int,
+    scores_out: np.ndarray,
+    n_threads: int = 0,
+    fp_size: int | None = None,
+    n_rows: int | None = None,
+):
+    """Call the packed u8 scorer for arrays already validated by the caller."""
+    if _calculate_tanimoto_score_packed_u8 is None:
+        raise RuntimeError(
+            "calculate_tanimoto_score_packed_u8 not available in libtanimoto.so"
+        )
+
+    if fp_size is None:
+        fp_size = A.shape[1]
+    if n_rows is None:
+        n_rows = A.shape[0]
+
+    _calculate_tanimoto_score_packed_u8(
+        A,
+        query_bytes,
+        int(onesQ),
+        int(onesA),
+        scores_out,
+        fp_size,
+        n_rows,
+        n_threads
+    )
+
 
 def calculate_tanimoto_score_for_hits(
     A: np.ndarray,

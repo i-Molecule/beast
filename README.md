@@ -58,6 +58,7 @@ scores = get_sim_scores(
     num_workers=1,
     threads_per_worker=1,
 )
+scores_float = scores.astype(np.float32) / 100.0
 
 hits = get_sim_compounds(
     x_b=db,
@@ -78,6 +79,9 @@ Notes:
 - `ZINC(...)` expects a generated database manifest such as `table_128.csv`, not
   the raw `chunk_table.csv` from the download step.
 - `get_sim_scores` currently supports only one query fingerprint.
+- `get_sim_scores` returns centi-scores stored as `round(score * 100)` in
+  `uint8`; decode with `scores.astype(np.float32) / 100`. If you use
+  `output_memmap`, reopen the file with `dtype=np.uint8`.
 - `get_sim_compounds` accepts either a single query or a stack of queries.
 
 ## Output Files
@@ -234,6 +238,7 @@ db = ZINC("tables/table_128.csv")
 fp = np.array([1, 0, 1, 0] * 32, dtype=np.uint8)
 
 scores = get_sim_scores(x_b=db, x_q=fp)
+scores_float = scores.astype(np.float32) / 100.0
 
 hits = get_sim_compounds(
     x_b=db,
@@ -302,6 +307,7 @@ db = DataBase("tables/table_128.csv")
 fp = np.array([1, 0, 1, 0] * 32, dtype=np.uint8)
 
 scores = get_sim_scores(x_b=db, x_q=fp)
+scores_float = scores.astype(np.float32) / 100.0
 ```
 
 ### Generic Chunk Normalization
