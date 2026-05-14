@@ -70,6 +70,26 @@ _calculate_overlap_union_packed = _load_symbol(
     ctypes.c_int,
 )
 
+_calculate_overlap_union_packed_with_scores = _load_symbol(
+    "calculate_overlap_union_packed_with_scores",
+    [
+        ndpointer(ctypes.c_uint8, flags="C_CONTIGUOUS"), # A
+        ndpointer(ctypes.c_uint8, flags="C_CONTIGUOUS"), # query_bytes
+        ndpointer(ctypes.c_uint32, flags="C_CONTIGUOUS"), # onesQ_ptr
+        ctypes.c_uint32, # onesA
+        ctypes.c_float, # lower_bound
+        ctypes.c_float, # upper_bound
+        ctypes.POINTER(ctypes.POINTER(ctypes.c_uint32)), # hit_positions_ptr
+        ctypes.POINTER(ctypes.POINTER(ctypes.c_uint8)), # hit_scores_ptr
+        ndpointer(ctypes.c_uint32, flags="C_CONTIGUOUS"), # hit_counts_ptr
+        ctypes.c_size_t, # fp_size
+        ctypes.c_size_t, # n_rows
+        ctypes.c_size_t, # n_queries
+        ctypes.c_int # n_threads
+    ],
+    ctypes.c_int,
+)
+
 
 # void calculate_tanimoto_score(
 #     const uint8_t* A_ptr,
@@ -700,6 +720,82 @@ def calculate_overlap_union_packed(
         float(lower_bound),
         float(upper_bound),
         hit_ptrs,
+        hit_counts,
+        fp_size,
+        n_rows,
+        n_queries,
+        n_threads
+    )
+
+
+def calculate_overlap_union_packed_with_scores(
+    A: np.ndarray,
+    query_bytes: np.ndarray,
+    onesQ: np.ndarray,
+    onesA: float,
+    lower_bound: float,
+    upper_bound: float,
+    hit_positions: np.ndarray,
+    hit_scores: np.ndarray,
+    hit_counts: np.ndarray,
+    n_threads: int = 0,
+) -> int:
+    if _calculate_overlap_union_packed_with_scores is None:
+        raise RuntimeError(
+            "calculate_overlap_union_packed_with_scores not available in libtanimoto.so"
+        )
+    if lower_bound > upper_bound:
+        raise ValueError("lower_bound must be less than or equal to upper_bound.")
+    if A.dtype != np.uint8 or not A.flags.c_contiguous:
+        A = np.ascontiguousarray(A, dtype=np.uint8)
+    query_bytes = np.ascontiguousarray(query_bytes, dtype=np.uint8)
+    onesQ = np.ascontiguousarray(onesQ, dtype=np.uint32)
+
+    if not isinstance(hit_positions, np.ndarray):
+        raise ValueError("hit_positions must be a numpy array.")
+    if hit_positions.dtype != np.uint32 or not hit_positions.flags.c_contiguous:
+        raise ValueError("hit_positions must be a contiguous uint32 array.")
+    if not isinstance(hit_scores, np.ndarray):
+        raise ValueError("hit_scores must be a numpy array.")
+    if hit_scores.dtype != np.uint8 or not hit_scores.flags.c_contiguous:
+        raise ValueError("hit_scores must be a contiguous uint8 array.")
+    if hit_counts.dtype != np.uint32 or not hit_counts.flags.c_contiguous:
+        hit_counts = np.ascontiguousarray(hit_counts, dtype=np.uint32)
+
+    n_queries = int(onesQ.shape[0])
+    if query_bytes.shape[0] != n_queries:
+        raise ValueError("query_bytes must have one row per query.")
+    if hit_positions.shape[0] != n_queries:
+        raise ValueError("hit_positions must have one row per query.")
+    if hit_scores.shape[0] != n_queries:
+        raise ValueError("hit_scores must have one row per query.")
+    if hit_scores.shape != hit_positions.shape:
+        raise ValueError("hit_scores must have the same shape as hit_positions.")
+    if hit_counts.shape[0] != n_queries:
+        raise ValueError("hit_counts must have one entry per query.")
+
+    hit_position_ptrs = (ctypes.POINTER(ctypes.c_uint32) * n_queries)()
+    hit_score_ptrs = (ctypes.POINTER(ctypes.c_uint8) * n_queries)()
+    for i in range(n_queries):
+        hit_position_ptrs[i] = hit_positions[i].ctypes.data_as(
+            ctypes.POINTER(ctypes.c_uint32)
+        )
+        hit_score_ptrs[i] = hit_scores[i].ctypes.data_as(
+            ctypes.POINTER(ctypes.c_uint8)
+        )
+
+    n_rows = A.shape[0]
+    fp_size = A.shape[1]
+
+    return _calculate_overlap_union_packed_with_scores(
+        A,
+        query_bytes,
+        onesQ,
+        int(onesA),
+        float(lower_bound),
+        float(upper_bound),
+        hit_position_ptrs,
+        hit_score_ptrs,
         hit_counts,
         fp_size,
         n_rows,

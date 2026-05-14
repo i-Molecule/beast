@@ -1,8 +1,7 @@
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import os
+from pathlib import Path
 from threading import local
-from typing import Optional, Union
 import numpy as np
 from tqdm import tqdm
 
@@ -10,8 +9,8 @@ from beast.tanimoto_cpp import (
     calculate_tanimoto_score_packed_u8_unchecked,
     calculate_tanimoto_score_for_hits_packed,
     calculate_overlap_union_packed,
+    calculate_overlap_union_packed_with_scores,
 )
-from pathlib import Path
 
 
 def _make_thread_buffer_cache():
@@ -88,6 +87,71 @@ def _query_ids_allowed_for_on_bits(
         allowed &= min_tanimoto <= upper_bound
 
     return np.flatnonzero(allowed)
+
+
+def _get_smiles_for_chunk_query_hits(x_b, chunk_idx: int, query_hits):
+    if not query_hits:
+        return {}
+
+    lengths = [len(positions) for _, positions in query_hits]
+    if len(query_hits) == 1:
+        query_idx, positions = query_hits[0]
+        smiles = x_b.get_smiles_and_ids_by_ref_indices({chunk_idx: positions})[
+            chunk_idx
+        ]
+        return {query_idx: smiles}
+
+    all_positions = np.concatenate([positions for _, positions in query_hits])
+    all_smiles = x_b.get_smiles_and_ids_by_ref_indices({chunk_idx: all_positions})[
+        chunk_idx
+    ]
+
+    smiles_by_query = {}
+    offset = 0
+    for (query_idx, _), length in zip(query_hits, lengths):
+        next_offset = offset + length
+        smiles_by_query[query_idx] = all_smiles[offset:next_offset]
+        offset = next_offset
+
+    return smiles_by_query
+
+
+def _format_tsv_cell(value) -> str:
+    return str(value).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+
+def _format_smiles_block_tsv_chunks(x_b, block, batch_size: int = 8192):
+    chunk_idx, query_ids, offsets, positions_all, scores_all = block
+    smiles_rows = x_b.get_smiles_and_ids_by_ref_indices({chunk_idx: positions_all})[
+        chunk_idx
+    ]
+
+    line_buffer = []
+    text_chunks = []
+
+    def flush_lines():
+        if line_buffer:
+            text_chunks.append("".join(line_buffer))
+            line_buffer.clear()
+
+    for i, query_idx in enumerate(query_ids):
+        start = int(offsets[i])
+        end = int(offsets[i + 1])
+        for position, score, (smiles, compound_id) in zip(
+            positions_all[start:end],
+            scores_all[start:end],
+            smiles_rows[start:end],
+        ):
+            line_buffer.append(
+                f"{chunk_idx}\t{query_idx}\t{int(position)}\t"
+                f"{int(score)}\t{_format_tsv_cell(smiles)}\t"
+                f"{_format_tsv_cell(compound_id)}\n"
+            )
+            if len(line_buffer) >= batch_size:
+                flush_lines()
+
+    flush_lines()
+    return text_chunks
 
 
 def get_sim_scores(
@@ -419,19 +483,25 @@ def get_sim_compounds_multi_query(
 
         if n_hits:
             local_results = defaultdict(dict)
+            smiles_hits = []
             for i in range(n_active_queries):
                 if hit_counts[i] > 0:
                     query_idx = int(query_ids[i])
                     if return_smiles:
-                        local_results[query_idx]["smiles"] = (
-                            x_b.get_smiles_and_ids_by_ref_indices(
-                                {idx: hit_positions[i, : hit_counts[i]]}
-                            )[idx]
+                        smiles_hits.append(
+                            (query_idx, hit_positions[i, : hit_counts[i]])
                         )
                     else:
                         local_results[query_idx]["positions"] = hit_positions[
                             i, : hit_counts[i]
                         ].copy()
+
+            if return_smiles:
+                smiles_by_query = _get_smiles_for_chunk_query_hits(
+                    x_b, idx, smiles_hits
+                )
+                for query_idx, smiles in smiles_by_query.items():
+                    local_results[query_idx]["smiles"] = smiles
 
             search_results[idx] = local_results
 
@@ -446,3 +516,132 @@ def get_sim_compounds_multi_query(
             pbar.update(batch_size)
 
     return search_results
+
+
+def get_sim_compounds_multi_query_with_scores(
+    x_b,
+    x_q,
+    lower_bound: float,
+    upper_bound: float,
+    smiles_output_path,
+    num_workers: int = 8,
+    threads_per_worker: int = 6,
+):
+    """Find multi-query similarity hits and stream them to a TSV file.
+
+    Returns:
+        Path to the written TSV file. Rows contain chunk index, query index,
+        position within chunk, uint8 centi-score, SMILES, and compound id.
+    """
+
+    if smiles_output_path is None:
+        raise ValueError("smiles_output_path is required for scored multi-query search.")
+
+    x_q_arr = np.asarray(x_q)
+    if _is_single_query_input(x_q_arr):
+        raise ValueError(
+            "get_sim_compounds_multi_query_with_scores expects multiple queries. "
+            "Pass a 2D query array with at least two rows."
+        )
+    if lower_bound > upper_bound:
+        raise ValueError("lower_bound must be less than or equal to upper_bound.")
+
+    x_q_packed, onesQ = prepare_query(x_q_arr)
+    onesQ_u32 = np.ascontiguousarray(onesQ, dtype=np.uint32)
+    fp_size_bits = x_q_arr.shape[1]
+
+    database_size = len(x_b)
+    arguments_raw = x_b.chunk_info
+
+    arguments = []
+    max_batch = 0
+    query_payload_by_on_bits = {}
+    for i, path, batch_size, on_bits, start, end in arguments_raw:
+        arguments.append((i, path, batch_size, on_bits, start, end))
+        if batch_size > max_batch:
+            max_batch = batch_size
+        if on_bits not in query_payload_by_on_bits:
+            query_ids = _query_ids_allowed_for_on_bits(
+                onesQ,
+                on_bits,
+                fp_size_bits,
+                lower_bound,
+                upper_bound,
+            )
+            query_payload_by_on_bits[on_bits] = (
+                query_ids,
+                np.ascontiguousarray(x_q_packed[query_ids], dtype=np.uint8),
+                np.ascontiguousarray(onesQ_u32[query_ids], dtype=np.uint32),
+            )
+
+    output_path = Path(smiles_output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    buffer_cache = _make_thread_buffer_cache()
+
+    def _worker(idx: int, path: str, batch_size: int, on_bits: int, *args, **kwargs):
+        query_ids, query_bytes, active_onesQ = query_payload_by_on_bits[on_bits]
+        n_active_queries = len(query_ids)
+        if batch_size == 0 or n_active_queries == 0:
+            return batch_size, []
+
+        chunk = np.load(path, mmap_mode="r")
+        onesA = on_bits
+
+        hit_positions = buffer_cache(
+            "scored_hit_positions", (n_active_queries, max_batch), np.uint32
+        )
+        hit_scores = buffer_cache(
+            "scored_hit_scores", (n_active_queries, max_batch), np.uint8
+        )
+        hit_counts = buffer_cache("scored_hit_counts", (n_active_queries,), np.uint32)
+
+        n_hits = calculate_overlap_union_packed_with_scores(
+            chunk,
+            query_bytes,
+            active_onesQ,
+            onesA,
+            lower_bound,
+            upper_bound,
+            hit_positions=hit_positions,
+            hit_scores=hit_scores,
+            hit_counts=hit_counts,
+            n_threads=threads_per_worker,
+        )
+
+        if n_hits:
+            hit_query_ids = []
+            offsets = [0]
+            positions_parts = []
+            scores_parts = []
+            for i in range(n_active_queries):
+                count = int(hit_counts[i])
+                if count > 0:
+                    hit_query_ids.append(int(query_ids[i]))
+                    positions_parts.append(hit_positions[i, :count].copy())
+                    scores_parts.append(hit_scores[i, :count].copy())
+                    offsets.append(offsets[-1] + count)
+
+            block = (
+                idx,
+                np.asarray(hit_query_ids, dtype=np.int64),
+                np.asarray(offsets, dtype=np.uint64),
+                np.concatenate(positions_parts).astype(np.uint32, copy=False),
+                np.concatenate(scores_parts).astype(np.uint8, copy=False),
+            )
+            return batch_size, _format_smiles_block_tsv_chunks(x_b, block)
+
+        return batch_size, []
+
+    with output_path.open("w", encoding="utf-8") as out:
+        out.write("chunk_idx\tquery_idx\tposition\tscore\tsmiles\tcompound_id\n")
+        with ThreadPoolExecutor(max_workers=num_workers) as ex, tqdm(
+            total=database_size
+        ) as pbar:
+            futures = [ex.submit(_worker, *args) for args in arguments]
+            for fut in as_completed(futures):
+                batch_size, text_chunks = fut.result()
+                for text_chunk in text_chunks:
+                    out.write(text_chunk)
+                pbar.update(batch_size)
+
+    return output_path

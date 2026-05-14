@@ -28,6 +28,7 @@ class BuildShared(Command):
             str(output_path),
             str(src_dir / "tanimoto_multi_query_overlap.cpp"),
             str(src_dir / "tanimoto_multi_query_overlap_packed.cpp"),
+            str(src_dir / "tanimoto_multi_query_overlap_packed_with_scores.cpp"),
             str(src_dir / "tanimoto_single_query.cpp"),
             str(src_dir / "tanimoto_single_query_fp16.cpp"),
             str(src_dir / "tanimoto_single_query_packed_fp16.cpp"),

@@ -49,6 +49,27 @@ int calculate_overlap_union_packed(
 );
 
 /**
+ * Calculates Tanimoto hits and uint8 centi-scores for packed queries.
+ * Input is bit-packed along axis=1 (shape: n_rows x fp_size_bytes).
+ * Query is bit-packed along axis=1 (shape: n_queries x fp_size_bytes).
+ */
+int calculate_overlap_union_packed_with_scores(
+    const uint8_t* A_ptr,
+    const uint8_t* query_bytes_ptr,
+    const uint32_t* onesQ_ptr,
+    uint32_t onesA,
+    float lower_bound,
+    float upper_bound,
+    uint32_t* const* hit_positions_ptr,
+    uint8_t* const* hit_scores_ptr,
+    uint32_t* hit_counts_ptr,
+    size_t fp_size,
+    size_t n_rows,
+    size_t n_queries,
+    int n_threads
+);
+
+/**
  * Calculates generic Tanimoto scores for a single query against N targets.
  */
 void calculate_tanimoto_score(
