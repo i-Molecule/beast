@@ -230,7 +230,11 @@ Python:
 import numpy as np
 
 from beast.database import ZINC
-from beast.run import get_sim_compounds, get_sim_scores
+from beast.run import (
+    get_sim_compounds,
+    get_sim_compounds_multi_query_with_scores,
+    get_sim_scores,
+)
 
 db = ZINC("tables/table_128.csv")
 
@@ -262,12 +266,30 @@ multi_hits = get_sim_compounds(
     lower_bound=0.8,
     upper_bound=1.0,
 )
+
+scored_multi_hits_path = get_sim_compounds_multi_query_with_scores(
+    x_b=db,
+    x_q=fps,
+    lower_bound=0.8,
+    upper_bound=1.0,
+    smiles_output_path="hits.tsv",
+)
 ```
 
 Return shapes:
 
 - single-query `get_sim_compounds`: `{chunk_idx: {"score": ..., "positions" or "smiles": ...}}`
 - multi-query `get_sim_compounds`: `{chunk_idx: {query_idx: {"score": ..., "positions" or "smiles": ...}}}`
+- `get_sim_compounds_multi_query_with_scores`: returns the `Path` to a TSV file
+  with columns `chunk_idx`, `query_idx`, `position`, `score`, `smiles`, and
+  `compound_id`. `score` is a `uint8` centi-score in the range `0..100`.
+
+`get_sim_compounds_multi_query_with_scores` is intended for large multi-query
+searches where materializing all SMILES payloads in memory is inconvenient. It
+requires a 2D query array with at least two rows and streams the scored hits to
+disk. If a chunk produces more hits than the configured compact hit buffer can
+hold, it raises `MemoryError`; increase `hit_capacity_per_query` or
+`max_hit_capacity_per_chunk` for broader searches.
 
 ## Enamine
 

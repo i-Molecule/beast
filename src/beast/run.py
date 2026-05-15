@@ -8,7 +8,6 @@ from tqdm import tqdm
 from beast.tanimoto_cpp import (
     calculate_tanimoto_score_packed_u8_unchecked,
     calculate_tanimoto_score_for_hits_packed,
-    calculate_overlap_union_packed,
     calculate_overlap_union_packed_with_scores,
 )
 
@@ -121,7 +120,7 @@ def _format_tsv_cell(value) -> str:
 
 
 def _format_smiles_block_tsv_chunks(x_b, block, batch_size: int = 8192):
-    chunk_idx, query_ids, offsets, positions_all, scores_all = block
+    chunk_idx, query_ids, positions_all, scores_all = block
     smiles_rows = x_b.get_smiles_and_ids_by_ref_indices({chunk_idx: positions_all})[
         chunk_idx
     ]
@@ -134,21 +133,19 @@ def _format_smiles_block_tsv_chunks(x_b, block, batch_size: int = 8192):
             text_chunks.append("".join(line_buffer))
             line_buffer.clear()
 
-    for i, query_idx in enumerate(query_ids):
-        start = int(offsets[i])
-        end = int(offsets[i + 1])
-        for position, score, (smiles, compound_id) in zip(
-            positions_all[start:end],
-            scores_all[start:end],
-            smiles_rows[start:end],
-        ):
-            line_buffer.append(
-                f"{chunk_idx}\t{query_idx}\t{int(position)}\t"
-                f"{int(score)}\t{_format_tsv_cell(smiles)}\t"
-                f"{_format_tsv_cell(compound_id)}\n"
-            )
-            if len(line_buffer) >= batch_size:
-                flush_lines()
+    for query_idx, position, score, (smiles, compound_id) in zip(
+        query_ids,
+        positions_all,
+        scores_all,
+        smiles_rows,
+    ):
+        line_buffer.append(
+            f"{chunk_idx}\t{int(query_idx)}\t{int(position)}\t"
+            f"{int(score)}\t{_format_tsv_cell(smiles)}\t"
+            f"{_format_tsv_cell(compound_id)}\n"
+        )
+        if len(line_buffer) >= batch_size:
+            flush_lines()
 
     flush_lines()
     return text_chunks
@@ -400,6 +397,9 @@ def get_sim_compounds_multi_query(
     lower_bound: float,
     upper_bound: float,
     return_smiles: bool = False,
+    hit_capacity_per_query: int = 10,
+    min_hit_capacity_per_chunk: int = 10_000,
+    max_hit_capacity_per_chunk: int = 1_000_000,
     num_workers: int = 8,
     threads_per_worker: int = 6,
 ):
@@ -424,33 +424,45 @@ def get_sim_compounds_multi_query(
     """
 
     x_q_arr = np.asarray(x_q)
+    if hit_capacity_per_query < 1:
+        raise ValueError("hit_capacity_per_query must be positive.")
+    if min_hit_capacity_per_chunk < 1:
+        raise ValueError("min_hit_capacity_per_chunk must be positive.")
+    if max_hit_capacity_per_chunk < min_hit_capacity_per_chunk:
+        raise ValueError(
+            "max_hit_capacity_per_chunk must be greater than or equal to "
+            "min_hit_capacity_per_chunk."
+        )
+
     x_q_packed, onesQ = prepare_query(x_q_arr)
+    onesQ_u32 = np.ascontiguousarray(onesQ, dtype=np.uint32)
     fp_size_bits = x_q_arr.shape[1] if x_q_arr.ndim == 2 else x_q_arr.shape[0]
 
     database_size = len(x_b)
     arguments_raw = x_b.chunk_info
 
     arguments = []
-    max_batch = 0  # we need it for effective buffer caching in workers
-    allowed_query_ids_by_on_bits = {}
+    query_payload_by_on_bits = {}
     for i, path, batch_size, on_bits, start, end in arguments_raw:
         arguments.append((i, path, batch_size, on_bits, start, end))
-        if batch_size > max_batch:
-            max_batch = batch_size
-        if on_bits not in allowed_query_ids_by_on_bits:
-            allowed_query_ids_by_on_bits[on_bits] = _query_ids_allowed_for_on_bits(
+        if on_bits not in query_payload_by_on_bits:
+            query_ids = _query_ids_allowed_for_on_bits(
                 onesQ,
                 on_bits,
                 fp_size_bits,
                 lower_bound,
                 upper_bound,
             )
+            query_payload_by_on_bits[on_bits] = (
+                query_ids,
+                np.ascontiguousarray(x_q_packed[query_ids], dtype=np.uint8),
+                np.ascontiguousarray(onesQ_u32[query_ids], dtype=np.uint32),
+            )
 
     search_results = defaultdict(lambda: defaultdict(dict))
-    buffer_cache = _make_thread_buffer_cache()
 
     def _worker(idx: int, path: str, batch_size: int, on_bits: int, *args, **kwargs):
-        query_ids = allowed_query_ids_by_on_bits[on_bits]
+        query_ids, query_bytes, active_onesQ = query_payload_by_on_bits[on_bits]
         n_active_queries = len(query_ids)
         if batch_size == 0 or n_active_queries == 0:
             return batch_size
@@ -458,43 +470,56 @@ def get_sim_compounds_multi_query(
         chunk = np.load(path, mmap_mode="r")
         onesA = on_bits
 
-        query_bytes = np.ascontiguousarray(x_q_packed[query_ids], dtype=np.uint8)
-        active_onesQ = np.ascontiguousarray(onesQ[query_ids], dtype=np.float32)
-
-        hit_positions = buffer_cache(
-            "hit_positions", (n_active_queries, max_batch), np.uint32
+        hit_capacity = min(
+            max_hit_capacity_per_chunk,
+            max(min_hit_capacity_per_chunk, n_active_queries * hit_capacity_per_query),
         )
-        # hit_positions = hit_positions[:, : chunk.shape[0]] #does not work because it is not contiguous in memory after slicing
+        hit_query_ids = np.empty(hit_capacity, dtype=np.uint32)
+        hit_positions = np.empty(hit_capacity, dtype=np.uint32)
+        hit_scores = np.empty(hit_capacity, dtype=np.uint8)
+        hit_count = np.zeros(1, dtype=np.uint64)
+        overflow = np.zeros(1, dtype=np.uint8)
 
-        hit_counts = buffer_cache("hit_counts", (n_active_queries,), np.uint32)
-        # hit_counts.fill(0) # we can skip this because calculate_overlap_union_packed will set hit_counts[i] to 0 for queries that have no hits in the chunk
-
-        n_hits = calculate_overlap_union_packed(
+        n_hits = calculate_overlap_union_packed_with_scores(
             chunk,
             query_bytes,
             active_onesQ,
             onesA,
             lower_bound,
             upper_bound,
+            hit_query_ids=hit_query_ids,
             hit_positions=hit_positions,
-            hit_counts=hit_counts,
+            hit_scores=hit_scores,
+            hit_count=hit_count,
+            overflow=overflow,
             n_threads=threads_per_worker,
         )
+
+        if overflow[0]:
+            actual_hits = int(hit_count[0])
+            raise MemoryError(
+                f"Chunk {idx} produced {actual_hits} hits, exceeding compact "
+                f"hit_capacity_per_chunk={hit_capacity}. Increase "
+                "hit_capacity_per_query or max_hit_capacity_per_chunk."
+            )
 
         if n_hits:
             local_results = defaultdict(dict)
             smiles_hits = []
-            for i in range(n_active_queries):
-                if hit_counts[i] > 0:
-                    query_idx = int(query_ids[i])
-                    if return_smiles:
-                        smiles_hits.append(
-                            (query_idx, hit_positions[i, : hit_counts[i]])
-                        )
-                    else:
-                        local_results[query_idx]["positions"] = hit_positions[
-                            i, : hit_counts[i]
-                        ].copy()
+            n_hits = int(n_hits)
+            local_hit_query_ids = hit_query_ids[:n_hits]
+            local_hit_positions = hit_positions[:n_hits]
+            for local_query_idx in np.unique(local_hit_query_ids):
+                hit_mask = local_hit_query_ids == local_query_idx
+                positions = np.sort(local_hit_positions[hit_mask]).astype(
+                    np.uint32,
+                    copy=False,
+                )
+                query_idx = int(query_ids[int(local_query_idx)])
+                if return_smiles:
+                    smiles_hits.append((query_idx, positions))
+                else:
+                    local_results[query_idx]["positions"] = positions
 
             if return_smiles:
                 smiles_by_query = _get_smiles_for_chunk_query_hits(
@@ -524,6 +549,9 @@ def get_sim_compounds_multi_query_with_scores(
     lower_bound: float,
     upper_bound: float,
     smiles_output_path,
+    hit_capacity_per_query: int = 10,
+    min_hit_capacity_per_chunk: int = 10_000,
+    max_hit_capacity_per_chunk: int = 1_000_000,
     num_workers: int = 8,
     threads_per_worker: int = 6,
 ):
@@ -545,6 +573,15 @@ def get_sim_compounds_multi_query_with_scores(
         )
     if lower_bound > upper_bound:
         raise ValueError("lower_bound must be less than or equal to upper_bound.")
+    if hit_capacity_per_query < 1:
+        raise ValueError("hit_capacity_per_query must be positive.")
+    if min_hit_capacity_per_chunk < 1:
+        raise ValueError("min_hit_capacity_per_chunk must be positive.")
+    if max_hit_capacity_per_chunk < min_hit_capacity_per_chunk:
+        raise ValueError(
+            "max_hit_capacity_per_chunk must be greater than or equal to "
+            "min_hit_capacity_per_chunk."
+        )
 
     x_q_packed, onesQ = prepare_query(x_q_arr)
     onesQ_u32 = np.ascontiguousarray(onesQ, dtype=np.uint32)
@@ -554,12 +591,9 @@ def get_sim_compounds_multi_query_with_scores(
     arguments_raw = x_b.chunk_info
 
     arguments = []
-    max_batch = 0
     query_payload_by_on_bits = {}
     for i, path, batch_size, on_bits, start, end in arguments_raw:
         arguments.append((i, path, batch_size, on_bits, start, end))
-        if batch_size > max_batch:
-            max_batch = batch_size
         if on_bits not in query_payload_by_on_bits:
             query_ids = _query_ids_allowed_for_on_bits(
                 onesQ,
@@ -576,7 +610,6 @@ def get_sim_compounds_multi_query_with_scores(
 
     output_path = Path(smiles_output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    buffer_cache = _make_thread_buffer_cache()
 
     def _worker(idx: int, path: str, batch_size: int, on_bits: int, *args, **kwargs):
         query_ids, query_bytes, active_onesQ = query_payload_by_on_bits[on_bits]
@@ -587,13 +620,15 @@ def get_sim_compounds_multi_query_with_scores(
         chunk = np.load(path, mmap_mode="r")
         onesA = on_bits
 
-        hit_positions = buffer_cache(
-            "scored_hit_positions", (n_active_queries, max_batch), np.uint32
+        hit_capacity = min(
+            max_hit_capacity_per_chunk,
+            max(min_hit_capacity_per_chunk, n_active_queries * hit_capacity_per_query),
         )
-        hit_scores = buffer_cache(
-            "scored_hit_scores", (n_active_queries, max_batch), np.uint8
-        )
-        hit_counts = buffer_cache("scored_hit_counts", (n_active_queries,), np.uint32)
+        hit_query_ids = np.empty(hit_capacity, dtype=np.uint32)
+        hit_positions = np.empty(hit_capacity, dtype=np.uint32)
+        hit_scores = np.empty(hit_capacity, dtype=np.uint8)
+        hit_count = np.zeros(1, dtype=np.uint64)
+        overflow = np.zeros(1, dtype=np.uint8)
 
         n_hits = calculate_overlap_union_packed_with_scores(
             chunk,
@@ -602,31 +637,29 @@ def get_sim_compounds_multi_query_with_scores(
             onesA,
             lower_bound,
             upper_bound,
+            hit_query_ids=hit_query_ids,
             hit_positions=hit_positions,
             hit_scores=hit_scores,
-            hit_counts=hit_counts,
+            hit_count=hit_count,
+            overflow=overflow,
             n_threads=threads_per_worker,
         )
 
-        if n_hits:
-            hit_query_ids = []
-            offsets = [0]
-            positions_parts = []
-            scores_parts = []
-            for i in range(n_active_queries):
-                count = int(hit_counts[i])
-                if count > 0:
-                    hit_query_ids.append(int(query_ids[i]))
-                    positions_parts.append(hit_positions[i, :count].copy())
-                    scores_parts.append(hit_scores[i, :count].copy())
-                    offsets.append(offsets[-1] + count)
+        if overflow[0]:
+            actual_hits = int(hit_count[0])
+            raise MemoryError(
+                f"Chunk {idx} produced {actual_hits} hits, exceeding compact "
+                f"hit_capacity_per_chunk={hit_capacity}. Increase "
+                "hit_capacity_per_query or max_hit_capacity_per_chunk."
+            )
 
+        if n_hits:
+            n_hits = int(n_hits)
             block = (
                 idx,
-                np.asarray(hit_query_ids, dtype=np.int64),
-                np.asarray(offsets, dtype=np.uint64),
-                np.concatenate(positions_parts).astype(np.uint32, copy=False),
-                np.concatenate(scores_parts).astype(np.uint8, copy=False),
+                query_ids[hit_query_ids[:n_hits]].astype(np.int64, copy=False),
+                hit_positions[:n_hits].copy(),
+                hit_scores[:n_hits].copy(),
             )
             return batch_size, _format_smiles_block_tsv_chunks(x_b, block)
 

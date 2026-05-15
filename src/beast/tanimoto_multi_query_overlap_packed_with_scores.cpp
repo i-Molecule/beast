@@ -84,16 +84,20 @@ extern "C" int calculate_overlap_union_packed_with_scores(
     uint32_t onesA,
     float lower_bound,
     float upper_bound,
-    uint32_t* const* hit_positions_ptr,
-    uint8_t* const* hit_scores_ptr,
-    uint32_t* RESTRICT hit_counts_ptr,
+    uint32_t* RESTRICT hit_query_ids_ptr,
+    uint32_t* RESTRICT hit_positions_ptr,
+    uint8_t* RESTRICT hit_scores_ptr,
+    uint64_t hit_capacity,
+    uint64_t* RESTRICT hit_count_ptr,
+    uint8_t* RESTRICT overflow_ptr,
     size_t fp_size,
     size_t n_rows,
     size_t n_queries,
     int n_threads
 ) {
     if (!A_ptr || !query_bytes_ptr || !onesQ_ptr ||
-        !hit_positions_ptr || !hit_scores_ptr || !hit_counts_ptr) {
+        !hit_query_ids_ptr || !hit_positions_ptr || !hit_scores_ptr ||
+        !hit_count_ptr || !overflow_ptr) {
         return 0;
     }
     if (fp_size == 0 || n_rows == 0 || n_queries == 0) {
@@ -108,22 +112,19 @@ extern "C" int calculate_overlap_union_packed_with_scores(
         omp_set_num_threads(threads);
     }
 
+    *hit_count_ptr = 0u;
+    *overflow_ptr = 0u;
+
     const size_t n_cols = fp_size;
     std::vector<uint32_t> sumQA(n_queries, 0u);
     std::vector<uint32_t> lower_inter(n_queries, 0u);
     std::vector<uint32_t> upper_inter(n_queries, 0u);
-    std::vector<uint8_t> query_active(n_queries, 0u);
     std::vector<size_t> active_queries;
     active_queries.reserve(n_queries);
 
     for (size_t q = 0; q < n_queries; ++q) {
-        if (!hit_positions_ptr[q] || !hit_scores_ptr[q]) {
-            hit_counts_ptr[q] = 0;
-            continue;
-        }
         const uint32_t onesQ = onesQ_ptr[q];
         if (onesQ == 0u) {
-            hit_counts_ptr[q] = 0;
             continue;
         }
 
@@ -143,31 +144,17 @@ extern "C" int calculate_overlap_union_packed_with_scores(
                 &lower_i,
                 &upper_i
             )) {
-            hit_counts_ptr[q] = 0;
             continue;
         }
 
         sumQA[q] = sum;
         lower_inter[q] = lower_i;
         upper_inter[q] = upper_i;
-        query_active[q] = 1u;
         active_queries.push_back(q);
     }
 
     if (active_queries.empty()) {
         return 0;
-    }
-
-    const int max_threads = omp_get_max_threads();
-    struct ThreadHits {
-        std::vector<uint32_t> items;
-        std::vector<uint32_t> queries;
-        std::vector<uint8_t> scores;
-        std::vector<uint32_t> counts;
-    };
-    std::vector<ThreadHits> thread_hits((size_t)max_threads);
-    for (int t = 0; t < max_threads; ++t) {
-        thread_hits[(size_t)t].counts.assign(n_queries, 0u);
     }
 
     const bool use_words = (n_cols % 8 == 0);
@@ -188,9 +175,6 @@ extern "C" int calculate_overlap_union_packed_with_scores(
 
     #pragma omp parallel
     {
-        int tid = omp_get_thread_num();
-        ThreadHits& hits = thread_hits[(size_t)tid];
-
         #pragma omp for schedule(static)
         for (long row = 0; row < (long)n_rows; ++row) {
             const uint8_t* row_ptr = A_ptr + (size_t)row * n_cols;
@@ -220,49 +204,23 @@ extern "C" int calculate_overlap_union_packed_with_scores(
                     continue;
                 }
 
-                hits.items.push_back((uint32_t)row);
-                hits.queries.push_back((uint32_t)q);
-                hits.scores.push_back(_centi_score_for_inter(inter, sumQA[q]));
-                hits.counts[q] += 1u;
+                uint64_t write_pos = 0u;
+                #pragma omp atomic capture
+                write_pos = (*hit_count_ptr)++;
+
+                if (write_pos < hit_capacity) {
+                    hit_query_ids_ptr[write_pos] = (uint32_t)q;
+                    hit_positions_ptr[write_pos] = (uint32_t)row;
+                    hit_scores_ptr[write_pos] = _centi_score_for_inter(
+                        inter, sumQA[q]
+                    );
+                } else {
+                    #pragma omp atomic write
+                    *overflow_ptr = 1u;
+                }
             }
         }
     }
 
-    size_t total_hits = 0;
-    std::vector<size_t> thread_offsets((size_t)max_threads * n_queries, 0);
-
-    for (size_t q = 0; q < n_queries; ++q) {
-        if (!query_active[q]) {
-            hit_counts_ptr[q] = 0;
-            continue;
-        }
-
-        size_t total_hits_q = 0;
-        for (int t = 0; t < max_threads; ++t) {
-            thread_offsets[(size_t)t * n_queries + q] = total_hits_q;
-            total_hits_q += thread_hits[(size_t)t].counts[q];
-        }
-        hit_counts_ptr[q] = (uint32_t)total_hits_q;
-        total_hits += total_hits_q;
-    }
-
-    for (int t = 0; t < max_threads; ++t) {
-        ThreadHits& hits = thread_hits[(size_t)t];
-        if (hits.items.empty()) {
-            continue;
-        }
-        std::vector<size_t> write_pos(n_queries, 0);
-        size_t base = (size_t)t * n_queries;
-        for (size_t q = 0; q < n_queries; ++q) {
-            write_pos[q] = thread_offsets[base + q];
-        }
-        for (size_t i = 0; i < hits.items.size(); ++i) {
-            uint32_t q = hits.queries[i];
-            size_t pos = write_pos[q]++;
-            hit_positions_ptr[q][pos] = hits.items[i];
-            hit_scores_ptr[q][pos] = hits.scores[i];
-        }
-    }
-
-    return (int)total_hits;
+    return *overflow_ptr ? -1 : (int)(*hit_count_ptr);
 }

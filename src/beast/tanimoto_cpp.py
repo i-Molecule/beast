@@ -79,9 +79,12 @@ _calculate_overlap_union_packed_with_scores = _load_symbol(
         ctypes.c_uint32, # onesA
         ctypes.c_float, # lower_bound
         ctypes.c_float, # upper_bound
-        ctypes.POINTER(ctypes.POINTER(ctypes.c_uint32)), # hit_positions_ptr
-        ctypes.POINTER(ctypes.POINTER(ctypes.c_uint8)), # hit_scores_ptr
-        ndpointer(ctypes.c_uint32, flags="C_CONTIGUOUS"), # hit_counts_ptr
+        ndpointer(ctypes.c_uint32, flags="C_CONTIGUOUS"), # hit_query_ids_ptr
+        ndpointer(ctypes.c_uint32, flags="C_CONTIGUOUS"), # hit_positions_ptr
+        ndpointer(ctypes.c_uint8, flags="C_CONTIGUOUS"), # hit_scores_ptr
+        ctypes.c_uint64, # hit_capacity
+        ndpointer(ctypes.c_uint64, flags="C_CONTIGUOUS"), # hit_count_ptr
+        ndpointer(ctypes.c_uint8, flags="C_CONTIGUOUS"), # overflow_ptr
         ctypes.c_size_t, # fp_size
         ctypes.c_size_t, # n_rows
         ctypes.c_size_t, # n_queries
@@ -735,9 +738,11 @@ def calculate_overlap_union_packed_with_scores(
     onesA: float,
     lower_bound: float,
     upper_bound: float,
+    hit_query_ids: np.ndarray,
     hit_positions: np.ndarray,
     hit_scores: np.ndarray,
-    hit_counts: np.ndarray,
+    hit_count: np.ndarray,
+    overflow: np.ndarray,
     n_threads: int = 0,
 ) -> int:
     if _calculate_overlap_union_packed_with_scores is None:
@@ -751,6 +756,10 @@ def calculate_overlap_union_packed_with_scores(
     query_bytes = np.ascontiguousarray(query_bytes, dtype=np.uint8)
     onesQ = np.ascontiguousarray(onesQ, dtype=np.uint32)
 
+    if not isinstance(hit_query_ids, np.ndarray):
+        raise ValueError("hit_query_ids must be a numpy array.")
+    if hit_query_ids.dtype != np.uint32 or not hit_query_ids.flags.c_contiguous:
+        raise ValueError("hit_query_ids must be a contiguous uint32 array.")
     if not isinstance(hit_positions, np.ndarray):
         raise ValueError("hit_positions must be a numpy array.")
     if hit_positions.dtype != np.uint32 or not hit_positions.flags.c_contiguous:
@@ -759,33 +768,26 @@ def calculate_overlap_union_packed_with_scores(
         raise ValueError("hit_scores must be a numpy array.")
     if hit_scores.dtype != np.uint8 or not hit_scores.flags.c_contiguous:
         raise ValueError("hit_scores must be a contiguous uint8 array.")
-    if hit_counts.dtype != np.uint32 or not hit_counts.flags.c_contiguous:
-        hit_counts = np.ascontiguousarray(hit_counts, dtype=np.uint32)
+    if hit_positions.shape != hit_query_ids.shape:
+        raise ValueError("hit_positions must have the same shape as hit_query_ids.")
+    if hit_scores.shape != hit_query_ids.shape:
+        raise ValueError("hit_scores must have the same shape as hit_query_ids.")
+    if hit_count.dtype != np.uint64 or not hit_count.flags.c_contiguous:
+        hit_count = np.ascontiguousarray(hit_count, dtype=np.uint64)
+    if hit_count.shape[0] != 1:
+        raise ValueError("hit_count must have one entry.")
+    if overflow.dtype != np.uint8 or not overflow.flags.c_contiguous:
+        overflow = np.ascontiguousarray(overflow, dtype=np.uint8)
+    if overflow.shape[0] != 1:
+        raise ValueError("overflow must have one entry.")
 
     n_queries = int(onesQ.shape[0])
     if query_bytes.shape[0] != n_queries:
         raise ValueError("query_bytes must have one row per query.")
-    if hit_positions.shape[0] != n_queries:
-        raise ValueError("hit_positions must have one row per query.")
-    if hit_scores.shape[0] != n_queries:
-        raise ValueError("hit_scores must have one row per query.")
-    if hit_scores.shape != hit_positions.shape:
-        raise ValueError("hit_scores must have the same shape as hit_positions.")
-    if hit_counts.shape[0] != n_queries:
-        raise ValueError("hit_counts must have one entry per query.")
-
-    hit_position_ptrs = (ctypes.POINTER(ctypes.c_uint32) * n_queries)()
-    hit_score_ptrs = (ctypes.POINTER(ctypes.c_uint8) * n_queries)()
-    for i in range(n_queries):
-        hit_position_ptrs[i] = hit_positions[i].ctypes.data_as(
-            ctypes.POINTER(ctypes.c_uint32)
-        )
-        hit_score_ptrs[i] = hit_scores[i].ctypes.data_as(
-            ctypes.POINTER(ctypes.c_uint8)
-        )
 
     n_rows = A.shape[0]
     fp_size = A.shape[1]
+    hit_capacity = int(hit_query_ids.shape[0])
 
     return _calculate_overlap_union_packed_with_scores(
         A,
@@ -794,9 +796,12 @@ def calculate_overlap_union_packed_with_scores(
         int(onesA),
         float(lower_bound),
         float(upper_bound),
-        hit_position_ptrs,
-        hit_score_ptrs,
-        hit_counts,
+        hit_query_ids,
+        hit_positions,
+        hit_scores,
+        hit_capacity,
+        hit_count,
+        overflow,
         fp_size,
         n_rows,
         n_queries,

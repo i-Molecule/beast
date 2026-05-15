@@ -364,9 +364,11 @@ def test_overlap_union_packed_with_scores_returns_boundary_scores() -> None:
     chunk = np.packbits(chunk_bits, axis=1, bitorder="big")
     query_bytes = np.packbits(query_bits, axis=1, bitorder="big")
     ones_q = query_bits.sum(axis=1).astype(np.float32)
-    hit_positions = np.empty((2, chunk.shape[0]), dtype=np.uint32)
-    hit_scores = np.empty((2, chunk.shape[0]), dtype=np.uint8)
-    hit_counts = np.empty(2, dtype=np.uint32)
+    hit_query_ids = np.empty(8, dtype=np.uint32)
+    hit_positions = np.empty(8, dtype=np.uint32)
+    hit_scores = np.empty(8, dtype=np.uint8)
+    hit_count = np.zeros(1, dtype=np.uint64)
+    overflow = np.zeros(1, dtype=np.uint8)
 
     n_hits = calculate_overlap_union_packed_with_scores(
         chunk,
@@ -375,18 +377,71 @@ def test_overlap_union_packed_with_scores_returns_boundary_scores() -> None:
         onesA=4.0,
         lower_bound=0.5,
         upper_bound=1.0,
+        hit_query_ids=hit_query_ids,
         hit_positions=hit_positions,
         hit_scores=hit_scores,
-        hit_counts=hit_counts,
+        hit_count=hit_count,
+        overflow=overflow,
         n_threads=1,
     )
 
     assert n_hits == 5
-    np.testing.assert_array_equal(hit_counts, np.array([2, 3], dtype=np.uint32))
-    np.testing.assert_array_equal(hit_positions[0, :2], np.array([0, 1]))
-    np.testing.assert_array_equal(hit_scores[0, :2], np.array([100, 60]))
-    np.testing.assert_array_equal(hit_positions[1, :3], np.array([0, 1, 2]))
-    np.testing.assert_array_equal(hit_scores[1, :3], np.array([50, 50, 50]))
+    assert hit_count[0] == 5
+    assert overflow[0] == 0
+    actual = {
+        (int(q), int(position), int(score))
+        for q, position, score in zip(
+            hit_query_ids[:n_hits],
+            hit_positions[:n_hits],
+            hit_scores[:n_hits],
+        )
+    }
+    assert actual == {
+        (0, 0, 100),
+        (0, 1, 60),
+        (1, 0, 50),
+        (1, 1, 50),
+        (1, 2, 50),
+    }
+
+
+def test_overlap_union_packed_with_scores_reports_overflow() -> None:
+    chunk_bits = np.array(
+        [
+            [1, 1, 1, 1, 0, 0, 0, 0],
+            [1, 1, 1, 0, 1, 0, 0, 0],
+            [1, 1, 0, 0, 1, 1, 0, 0],
+        ],
+        dtype=np.uint8,
+    )
+    query_bits = np.array([[1, 1, 1, 1, 0, 0, 0, 0]], dtype=np.uint8)
+    chunk = np.packbits(chunk_bits, axis=1, bitorder="big")
+    query_bytes = np.packbits(query_bits, axis=1, bitorder="big")
+    ones_q = query_bits.sum(axis=1).astype(np.float32)
+    hit_query_ids = np.empty(1, dtype=np.uint32)
+    hit_positions = np.empty(1, dtype=np.uint32)
+    hit_scores = np.empty(1, dtype=np.uint8)
+    hit_count = np.zeros(1, dtype=np.uint64)
+    overflow = np.zeros(1, dtype=np.uint8)
+
+    n_hits = calculate_overlap_union_packed_with_scores(
+        chunk,
+        query_bytes,
+        ones_q,
+        onesA=4.0,
+        lower_bound=0.5,
+        upper_bound=1.0,
+        hit_query_ids=hit_query_ids,
+        hit_positions=hit_positions,
+        hit_scores=hit_scores,
+        hit_count=hit_count,
+        overflow=overflow,
+        n_threads=1,
+    )
+
+    assert n_hits == -1
+    assert hit_count[0] == 2
+    assert overflow[0] == 1
 
 
 def test_get_sim_scores_matches_manual_quantized_scores() -> None:
