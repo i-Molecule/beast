@@ -1,3 +1,5 @@
+[![License: PolyForm-Noncommercial-1.0.0](https://img.shields.io/badge/License-PolyForm--Noncommercial--1.0.0-orange.svg)](https://polyformproject.org/licenses/noncommercial/1.0.0)
+
 # beast
 
 `beast` builds searchable fingerprint tables from large SMILES libraries
@@ -378,3 +380,12 @@ chunks are in headerless CSV with no ID column:
 When an input row has no usable ID, `normalize_chunks` generates one in the
 form `<prefix>_<chunk_id>_<line_number>`. Change the prefix with
 `--generated-id-prefix`.
+
+---
+
+## 📄 License
+
+This project is available under the PolyForm Noncommercial license. 
+
+For commercial use, collaboration, or to request an alternative license, please contact [Petr Popov](mailto:popov.petrus@gmail.com).
+
