@@ -90,6 +90,15 @@ class ZINC:
 
         return arguments
 
+    def global_to_chunk_position(
+        self, global_indices: Sequence[int]
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Split concatenated-database indices into (chunk index, position)."""
+        starts = np.asarray([info[4] for info in self.chunk_info], dtype=np.int64)
+        indices = np.asarray(global_indices, dtype=np.int64)
+        chunk_indices = np.searchsorted(starts, indices, side="right") - 1
+        return chunk_indices, indices - starts[chunk_indices]
+
     def get_smiles_and_ids_by_ref_indices(
         self,
         chunk_to_indices: dict[int, Sequence[int]],

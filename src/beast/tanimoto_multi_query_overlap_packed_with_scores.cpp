@@ -29,6 +29,9 @@ static ALWAYS_INLINE bool _compute_inter_bounds_u32(
     uint32_t sumQA,
     float lower_bound,
     float upper_bound,
+    uint64_t thr_lower_num,
+    uint64_t thr_upper_num,
+    uint64_t thr_den,
     uint32_t max_inter,
     uint32_t* lower_inter,
     uint32_t* upper_inter
@@ -37,18 +40,27 @@ static ALWAYS_INLINE bool _compute_inter_bounds_u32(
         return false;
     }
 
-    float lower_f = (float)sumQA * lower_bound / (1.0f + lower_bound);
-    float upper_f = (float)sumQA * upper_bound / (1.0f + upper_bound);
-
-    uint32_t lower_i = (uint32_t)lower_f;
-    if ((float)lower_i < lower_f) {
-        lower_i++;
+    int64_t lower_64 = 0;
+    int64_t upper_64 = 0;
+    tanimoto_inter_bounds(
+        (uint64_t)sumQA,
+        lower_bound,
+        upper_bound,
+        thr_lower_num,
+        thr_upper_num,
+        thr_den,
+        &lower_64,
+        &upper_64
+    );
+    if (upper_64 < 0) {
+        return false;
+    }
+    if (lower_64 < 0) {
+        lower_64 = 0;
     }
 
-    uint32_t upper_i = (uint32_t)upper_f;
-    if ((float)upper_i > upper_f && upper_i > 0u) {
-        upper_i--;
-    }
+    uint32_t lower_i = (uint32_t)lower_64;
+    uint32_t upper_i = (uint32_t)upper_64;
     if (upper_i > max_inter) {
         upper_i = max_inter;
     }
@@ -84,6 +96,9 @@ extern "C" int calculate_overlap_union_packed_with_scores(
     uint32_t onesA,
     float lower_bound,
     float upper_bound,
+    uint64_t thr_lower_num,
+    uint64_t thr_upper_num,
+    uint64_t thr_den,
     uint32_t* RESTRICT hit_query_ids_ptr,
     uint32_t* RESTRICT hit_positions_ptr,
     uint8_t* RESTRICT hit_scores_ptr,
@@ -140,6 +155,9 @@ extern "C" int calculate_overlap_union_packed_with_scores(
                 sum,
                 lower_bound,
                 upper_bound,
+                thr_lower_num,
+                thr_upper_num,
+                thr_den,
                 max_inter,
                 &lower_i,
                 &upper_i

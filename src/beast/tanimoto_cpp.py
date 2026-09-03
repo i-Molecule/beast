@@ -1,10 +1,43 @@
 import ctypes
+import math
 import numpy as np
 import os
+from fractions import Fraction
 from numpy.ctypeslib import ndpointer
 
 _lib_path = os.path.join(os.path.dirname(__file__), "libtanimoto.so")
 _lib = ctypes.CDLL(_lib_path)
+
+# Largest denominator accepted when recovering a threshold's rational form.
+_THRESHOLD_MAX_DENOMINATOR = 1000000
+
+
+def _rational_bounds(lower_bound, upper_bound):
+    """Express both thresholds as exact numerators over a common denominator.
+
+    The kernels do not evaluate Tanimoto per row: once per chunk they turn the
+    threshold into an integer bound on the intersection popcount, then compare
+    integers in the hot loop. Deriving that bound in float misrounds whenever
+    the exact bound is an integer, because 0.4f and 1.4f are both inexact, and
+    every row whose Tanimoto sits exactly on the threshold is dropped. Passing
+    the rational form lets the kernel derive the bound in exact integers.
+
+    str() round-trips a float to its shortest decimal, so a threshold entered
+    as 0.4 comes back as 2/5 rather than the binary value 0.4000000059604645.
+    """
+    lower = Fraction(str(min(max(float(lower_bound), 0.0), 1.0)))
+    upper = Fraction(str(min(max(float(upper_bound), 0.0), 1.0)))
+    lower = lower.limit_denominator(_THRESHOLD_MAX_DENOMINATOR)
+    upper = upper.limit_denominator(_THRESHOLD_MAX_DENOMINATOR)
+
+    den = lower.denominator * upper.denominator // math.gcd(
+        lower.denominator, upper.denominator
+    )
+    return (
+        lower.numerator * (den // lower.denominator),
+        upper.numerator * (den // upper.denominator),
+        den,
+    )
 
 
 def _load_symbol(name, argtypes, restype):
@@ -29,6 +62,9 @@ _calculate_overlap_union = _load_symbol("calculate_overlap_union", [
     ctypes.c_float, # onesA
     ctypes.c_float, # lower_bound
     ctypes.c_float, # upper_bound
+    ctypes.c_uint64, # thr_lower_num
+    ctypes.c_uint64, # thr_upper_num
+    ctypes.c_uint64, # thr_den
     ctypes.POINTER(ctypes.POINTER(ctypes.c_uint32)), # hit_positions_ptr
     ndpointer(ctypes.c_uint32, flags="C_CONTIGUOUS"), # hit_counts_ptr
     ctypes.c_size_t, # fp_size
@@ -60,6 +96,9 @@ _calculate_overlap_union_packed = _load_symbol(
         ctypes.c_float, # onesA
         ctypes.c_float, # lower_bound
         ctypes.c_float, # upper_bound
+        ctypes.c_uint64, # thr_lower_num
+        ctypes.c_uint64, # thr_upper_num
+        ctypes.c_uint64, # thr_den
         ctypes.POINTER(ctypes.POINTER(ctypes.c_uint32)), # hit_positions_ptr
         ndpointer(ctypes.c_uint32, flags="C_CONTIGUOUS"), # hit_counts_ptr
         ctypes.c_size_t, # fp_size
@@ -79,6 +118,9 @@ _calculate_overlap_union_packed_with_scores = _load_symbol(
         ctypes.c_uint32, # onesA
         ctypes.c_float, # lower_bound
         ctypes.c_float, # upper_bound
+        ctypes.c_uint64, # thr_lower_num
+        ctypes.c_uint64, # thr_upper_num
+        ctypes.c_uint64, # thr_den
         ndpointer(ctypes.c_uint32, flags="C_CONTIGUOUS"), # hit_query_ids_ptr
         ndpointer(ctypes.c_uint32, flags="C_CONTIGUOUS"), # hit_positions_ptr
         ndpointer(ctypes.c_uint8, flags="C_CONTIGUOUS"), # hit_scores_ptr
@@ -207,6 +249,9 @@ _calculate_tanimoto_score_for_hits = _load_symbol("calculate_tanimoto_score_for_
     ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"), # scores_out
     ctypes.c_float, # lower_bound
     ctypes.c_float, # upper_bound
+    ctypes.c_uint64, # thr_lower_num
+    ctypes.c_uint64, # thr_upper_num
+    ctypes.c_uint64, # thr_den
     ndpointer(ctypes.c_uint32, flags="C_CONTIGUOUS"), # hit_positions
     ctypes.c_size_t, # n_rows
     ctypes.c_size_t, # width_bytes
@@ -236,6 +281,9 @@ _calculate_tanimoto_score_for_hits_packed = _load_symbol(
         ndpointer(ctypes.c_float, flags="C_CONTIGUOUS"), # scores_out
         ctypes.c_float, # lower_bound
         ctypes.c_float, # upper_bound
+        ctypes.c_uint64, # thr_lower_num
+        ctypes.c_uint64, # thr_upper_num
+        ctypes.c_uint64, # thr_den
         ndpointer(ctypes.c_uint32, flags="C_CONTIGUOUS"), # hit_positions
         ctypes.c_size_t, # fp_size
         ctypes.c_size_t, # n_rows
@@ -513,6 +561,10 @@ def calculate_tanimoto_score_for_hits(
     if width_bytes is None:
         width_bytes = A.shape[1]
 
+    thr_lower_num, thr_upper_num, thr_den = _rational_bounds(
+        lower_bound, upper_bound
+    )
+
     if counts is not None or counts_per_thread is not None:
         if counts is None or counts_per_thread is None:
             raise ValueError(
@@ -524,6 +576,7 @@ def calculate_tanimoto_score_for_hits(
             return _calculate_tanimoto_score_for_hits(
                 A, query_indices, onesQ, onesA, scores_out,
                 lower_bound, upper_bound,
+                thr_lower_num, thr_upper_num, thr_den,
                 hit_positions,
                 fp_size, width_bytes,
                 n_threads,
@@ -541,6 +594,7 @@ def calculate_tanimoto_score_for_hits(
     return _calculate_tanimoto_score_for_hits(
         A, query_indices, onesQ, onesA, scores_out,
         lower_bound, upper_bound,
+        thr_lower_num, thr_upper_num, thr_den,
         hit_positions,
         fp_size, width_bytes,
         n_threads,
@@ -595,6 +649,7 @@ def calculate_tanimoto_score_for_hits_packed(
         scores_out,
         float(lower_bound),
         float(upper_bound),
+        *_rational_bounds(lower_bound, upper_bound),
         hit_positions,
         fp_size,
         n_rows,
@@ -663,6 +718,7 @@ def calculate_overlap_union(
         float(onesA),
         float(lower_bound),
         float(upper_bound),
+        *_rational_bounds(lower_bound, upper_bound),
         hit_ptrs,
         hit_counts,
         fp_size,
@@ -722,6 +778,7 @@ def calculate_overlap_union_packed(
         float(onesA),
         float(lower_bound),
         float(upper_bound),
+        *_rational_bounds(lower_bound, upper_bound),
         hit_ptrs,
         hit_counts,
         fp_size,
@@ -796,6 +853,7 @@ def calculate_overlap_union_packed_with_scores(
         int(onesA),
         float(lower_bound),
         float(upper_bound),
+        *_rational_bounds(lower_bound, upper_bound),
         hit_query_ids,
         hit_positions,
         hit_scores,

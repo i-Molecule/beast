@@ -40,6 +40,9 @@ extern "C" int calculate_tanimoto_score_for_hits_packed(
     float* RESTRICT scores_out_ptr,
     float lower_bound,
     float upper_bound,
+    uint64_t thr_lower_num,
+    uint64_t thr_upper_num,
+    uint64_t thr_den,
     uint32_t* RESTRICT hit_positions_ptr,
     size_t fp_size,
     size_t n_rows,
@@ -69,16 +72,20 @@ extern "C" int calculate_tanimoto_score_for_hits_packed(
     }
 
     const float sumQA = onesQ + onesA;
-    const float lower_inter = sumQA * lower_bound / (1.0f + lower_bound);
-    const float upper_inter = sumQA * upper_bound / (1.0f + upper_bound);
-    int lower_inter_i = (int)lower_inter;
-    if ((float)lower_inter_i < lower_inter) {
-        lower_inter_i++;
-    }
-    int upper_inter_i = (int)upper_inter;
-    if ((float)upper_inter_i > upper_inter) {
-        upper_inter_i--;
-    }
+    int64_t lower_inter_64 = 0;
+    int64_t upper_inter_64 = 0;
+    tanimoto_inter_bounds(
+        (uint64_t)sumQA,
+        lower_bound,
+        upper_bound,
+        thr_lower_num,
+        thr_upper_num,
+        thr_den,
+        &lower_inter_64,
+        &upper_inter_64
+    );
+    int lower_inter_i = (int)lower_inter_64;
+    int upper_inter_i = (int)upper_inter_64;
     if (lower_inter_i < 0) {
         lower_inter_i = 0;
     }

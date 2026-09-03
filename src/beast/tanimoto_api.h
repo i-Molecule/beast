@@ -20,6 +20,9 @@ int calculate_overlap_union(
     float onesA,
     float lower_bound,
     float upper_bound,
+    uint64_t thr_lower_num,
+    uint64_t thr_upper_num,
+    uint64_t thr_den,
     uint32_t* const* hit_positions_ptr, // Output: per-query hit index arrays
     uint32_t* hit_counts_ptr,           // Output: number of hits per query
     size_t fp_size,
@@ -40,6 +43,9 @@ int calculate_overlap_union_packed(
     float onesA,
     float lower_bound,
     float upper_bound,
+    uint64_t thr_lower_num,
+    uint64_t thr_upper_num,
+    uint64_t thr_den,
     uint32_t* const* hit_positions_ptr,
     uint32_t* hit_counts_ptr,
     size_t fp_size,
@@ -60,6 +66,9 @@ int calculate_overlap_union_packed_with_scores(
     uint32_t onesA,
     float lower_bound,
     float upper_bound,
+    uint64_t thr_lower_num,
+    uint64_t thr_upper_num,
+    uint64_t thr_den,
     uint32_t* hit_query_ids_ptr,
     uint32_t* hit_positions_ptr,
     uint8_t* hit_scores_ptr,
@@ -148,6 +157,9 @@ int calculate_tanimoto_score_for_hits(
     float* scores_out_ptr,     // Output: Array of scores (length n_rows)
     float lower_bound,
     float upper_bound,
+    uint64_t thr_lower_num,
+    uint64_t thr_upper_num,
+    uint64_t thr_den,
     uint32_t* hit_positions_ptr, // Output: Array of filtered hit indices
     size_t fp_size,
     size_t n_rows,
@@ -166,6 +178,9 @@ int calculate_tanimoto_score_for_hits_packed(
     float* scores_out_ptr,     // Output: Array of scores (length n_rows)
     float lower_bound,
     float upper_bound,
+    uint64_t thr_lower_num,
+    uint64_t thr_upper_num,
+    uint64_t thr_den,
     uint32_t* hit_positions_ptr, // Output: Array of filtered hit indices
     size_t fp_size,
     size_t n_rows,
